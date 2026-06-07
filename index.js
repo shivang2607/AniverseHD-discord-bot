@@ -26,36 +26,42 @@ const PREFIX = "!";
 const WAIFU_WARS_CHANNEL = process.env.WAIFU_WARS_CHANNEL;
 const PERSONAL_WAIFU_CHANNEL = process.env.PERSONAL_WAIFU_CHANNEL;
 
-// NSFW tags from the waifu.im API that should be restricted to NSFW channels
-const NSFW_TAG_NAMES = new Set([
-  "Ero",
-  "Ecchi",
-  "Hentai",
-  "MILF",
-  "Oral",
-  "Paizuri",
-  "Ass",
-  "Oppai",
+// NSFW tag slugs from the waifu.im API that should be restricted to NSFW channels
+const NSFW_TAG_SLUGS = new Set([
+  "ero",
+  "ecchi",
+  "hentai",
+  "milf",
+  "oral",
+  "paizuri",
+  "ass",
+  "oppai",
 ]);
 
-// Fetch all tag names from the new waifu.im API
-// Returns { allTags: string[], nsfwTags: string[] }
+// Fetch all tags from the new waifu.im API
+// Returns { allTags: string[], nsfwSlugs: Set<string>, slugMap: Map<name, slug> }
 async function fetchWaifuTags() {
   const { data } = await axios.get("https://api.waifu.im/tags", {
     params: { PageSize: 100 },
   });
   const items = data.items || [];
   const allTags = items.map((t) => t.name);
-  const nsfwTags = items
-    .filter((t) => NSFW_TAG_NAMES.has(t.name))
-    .map((t) => t.name);
-  return { allTags, nsfwTags };
+  const nsfwSlugs = new Set(
+    items.filter((t) => NSFW_TAG_SLUGS.has(t.slug)).map((t) => t.slug)
+  );
+  // Build a case-insensitive name→slug lookup map
+  const slugMap = new Map();
+  items.forEach((t) => {
+    slugMap.set(t.name.toLowerCase(), t.slug);
+  });
+  return { allTags, nsfwSlugs, slugMap };
 }
 
 // Fetch a waifu image from the new waifu.im /images endpoint
-async function fetchWaifu(tag = null, nsfw = false) {
+// tagSlug: the slug form of the tag (e.g. "maid")
+async function fetchWaifu(tagSlug = null, nsfw = false) {
   const params = { PageSize: 1 };
-  if (tag) params.IncludedTags = tag;
+  if (tagSlug) params.IncludedTags = tagSlug;
   if (nsfw) params.IsNsfw = true;
   const { data } = await axios.get("https://api.waifu.im/images", { params });
   return data.items?.[0] || null;
@@ -134,7 +140,7 @@ client.on("messageCreate", async (message) => {
       )
         return;
 
-      const { allTags, nsfwTags } = await fetchWaifuTags();
+      const { allTags, nsfwSlugs, slugMap } = await fetchWaifuTags();
       const tag = args[0];
       const isNsfwChannel = message.channel.id === PERSONAL_WAIFU_CHANNEL;
 
@@ -142,12 +148,19 @@ client.on("messageCreate", async (message) => {
         return message.reply("❌ Invalid tag. Use `!waifutags` to see the list.");
       }
 
-      if (tag && nsfwTags.includes(tag) && !isNsfwChannel) {
+      // Look up the slug for the tag name (case-insensitive)
+      const tagSlug = tag ? slugMap.get(tag.toLowerCase()) : null;
+
+      if (tag && !tagSlug) {
+        return message.reply("❌ Invalid tag. Use `!waifutags` to see the list.");
+      }
+
+      if (tagSlug && nsfwSlugs.has(tagSlug) && !isNsfwChannel) {
         return message.reply("🚫 NSFW tags are not allowed.");
       }
 
-      const nsfw = nsfwTags.includes(tag);
-      const waifu = await fetchWaifu(tag, nsfw);
+      const nsfw = tagSlug ? nsfwSlugs.has(tagSlug) : false;
+      const waifu = await fetchWaifu(tagSlug, nsfw);
 
       if (!waifu) {
         return message.reply("⚠️ No waifus found for that tag.");
@@ -178,10 +191,16 @@ client.on("messageCreate", async (message) => {
       )
         return;
 
-      const { allTags, nsfwTags } = await fetchWaifuTags();
+      const { allTags, nsfwSlugs, slugMap } = await fetchWaifuTags();
       const isNsfwChannel = message.channel.id === PERSONAL_WAIFU_CHANNEL;
 
-      let tagsToShow = allTags.filter((t) => !nsfwTags.includes(t));
+      // Build set of SFW tag names for display filtering
+      const sfwNames = allTags.filter((name) => {
+        const slug = slugMap.get(name.toLowerCase());
+        return slug && !nsfwSlugs.has(slug);
+      });
+
+      let tagsToShow = sfwNames;
       if (isNsfwChannel) {
         tagsToShow = allTags;
       }
