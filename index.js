@@ -1,10 +1,10 @@
-import { 
-  Client, 
-  GatewayIntentBits, 
-  EmbedBuilder, 
-  ActionRowBuilder, 
-  ButtonBuilder, 
-  ButtonStyle 
+import {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } from "discord.js";
 import axios from "axios";
 import dotenv from "dotenv";
@@ -25,6 +25,41 @@ const PREFIX = "!";
 // Channel IDs (replace with your actual ones)
 const WAIFU_WARS_CHANNEL = process.env.WAIFU_WARS_CHANNEL;
 const PERSONAL_WAIFU_CHANNEL = process.env.PERSONAL_WAIFU_CHANNEL;
+
+// NSFW tags from the waifu.im API that should be restricted to NSFW channels
+const NSFW_TAG_NAMES = new Set([
+  "Ero",
+  "Ecchi",
+  "Hentai",
+  "MILF",
+  "Oral",
+  "Paizuri",
+  "Ass",
+  "Oppai",
+]);
+
+// Fetch all tag names from the new waifu.im API
+// Returns { allTags: string[], nsfwTags: string[] }
+async function fetchWaifuTags() {
+  const { data } = await axios.get("https://api.waifu.im/tags", {
+    params: { PageSize: 100 },
+  });
+  const items = data.items || [];
+  const allTags = items.map((t) => t.name);
+  const nsfwTags = items
+    .filter((t) => NSFW_TAG_NAMES.has(t.name))
+    .map((t) => t.name);
+  return { allTags, nsfwTags };
+}
+
+// Fetch a waifu image from the new waifu.im /images endpoint
+async function fetchWaifu(tag = null, nsfw = false) {
+  const params = { PageSize: 1 };
+  if (tag) params.IncludedTags = tag;
+  if (nsfw) params.IsNsfw = true;
+  const { data } = await axios.get("https://api.waifu.im/images", { params });
+  return data.items?.[0] || null;
+}
 
 client.on("clientReady", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
@@ -48,7 +83,6 @@ client.on("messageCreate", async (message) => {
       } catch {
         message.reply("Error fetching anime.");
       }
-
     } else {
       const query = args.join(" ");
       if (!query) return message.reply("Please provide a title.");
@@ -58,7 +92,8 @@ client.on("messageCreate", async (message) => {
           params: { q: query, limit: 5 },
         });
 
-        if (!data.data || data.data.length === 0) return message.reply("No results found.");
+        if (!data.data || data.data.length === 0)
+          return message.reply("No results found.");
 
         const embed = new EmbedBuilder()
           .setTitle(`Search results for: ${query}`)
@@ -75,7 +110,9 @@ client.on("messageCreate", async (message) => {
           row.addComponents(
             new ButtonBuilder()
               .setCustomId(`anime_${a.mal_id}`)
-              .setLabel(a.title.length > 80 ? a.title.slice(0, 77) + "..." : a.title)
+              .setLabel(
+                a.title.length > 80 ? a.title.slice(0, 77) + "..." : a.title
+              )
               .setStyle(ButtonStyle.Primary)
           );
         });
@@ -88,66 +125,65 @@ client.on("messageCreate", async (message) => {
   }
 
   // ----- Waifu Search -----
-if (command === "waifu") {
-  try {
-     if (![WAIFU_WARS_CHANNEL, PERSONAL_WAIFU_CHANNEL].includes(message.channel.id)) return;
+  if (command === "waifu") {
+    try {
+      if (
+        ![WAIFU_WARS_CHANNEL, PERSONAL_WAIFU_CHANNEL].includes(
+          message.channel.id
+        )
+      )
+        return;
 
-    const { data: tagData } = await axios.get("https://api.waifu.im/tags");
-    const nsfwTags = tagData.nsfw || [];
-    const sfwTags = tagData.sfw || [];
-    const versatileTags = tagData.versatile || [];
-    const allTags = [...nsfwTags, ...sfwTags, ...versatileTags];
+      const { allTags, nsfwTags } = await fetchWaifuTags();
+      const tag = args[0];
+      const isNsfwChannel = message.channel.id === PERSONAL_WAIFU_CHANNEL;
 
-    const tag = args[0];
+      if (tag && !allTags.includes(tag)) {
+        return message.reply("❌ Invalid tag. Use `!waifutags` to see the list.");
+      }
 
-    if (tag && !allTags.includes(tag)) {
-      return message.reply("❌ Invalid tag. Use `!waifutags` to see the list.");
+      if (tag && nsfwTags.includes(tag) && !isNsfwChannel) {
+        return message.reply("🚫 NSFW tags are not allowed.");
+      }
+
+      const nsfw = nsfwTags.includes(tag);
+      const waifu = await fetchWaifu(tag, nsfw);
+
+      if (!waifu) {
+        return message.reply("⚠️ No waifus found for that tag.");
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle(`Here's your waifu ❤️ ${tag ? `(${tag})` : ""}`)
+        .setImage(waifu.url)
+        .setColor("Random")
+        .setFooter({
+          text: `Tags: ${waifu.tags?.map((t) => t.name).join(", ") || "none"} | Source: waifu.im`,
+        });
+
+      message.channel.send({ embeds: [embed] });
+    } catch (err) {
+      console.error(err);
+      message.reply("❌ Something went wrong while fetching a waifu.");
     }
-
-    if (tag && nsfwTags.includes(tag) && message.channel.id !== PERSONAL_WAIFU_CHANNEL) {
-      return message.reply("🚫 NSFW tags are not allowed.");
-    }
-
-    const params = {};
-    if (tag) params.included_tags = tag;
-    const { data } = await axios.get("https://api.waifu.im/search", { params });
-
-    if (!data.images || data.images.length === 0) {
-      return message.reply("⚠️ No waifus found for that tag.");
-    }
-
-    const waifu = data.images[0];
-    const embed = new EmbedBuilder()
-      .setTitle(`Here’s your waifu ❤️ ${tag ? `(${tag})` : ""}`)
-      .setImage(waifu.url)
-      .setColor("Random")
-      .setFooter({
-        text: `Tags: ${waifu.tags?.map(t => t.name).join(", ") || "none"} | Source: waifu.im`
-      });
-
-    message.channel.send({ embeds: [embed] });
-
-  } catch (err) {
-    console.error(err);
-    message.reply("❌ Something went wrong while fetching a waifu.");
   }
-}
-
-
 
   // ----- Waifu Tags -----
   if (command === "waifutags") {
     try {
-         if (![WAIFU_WARS_CHANNEL, PERSONAL_WAIFU_CHANNEL].includes(message.channel.id)) return;
+      if (
+        ![WAIFU_WARS_CHANNEL, PERSONAL_WAIFU_CHANNEL].includes(
+          message.channel.id
+        )
+      )
+        return;
 
-      const { data: tagData } = await axios.get("https://api.waifu.im/tags");
-      const nsfwTags = tagData.nsfw || [];
-      const sfwTags = tagData.sfw || [];
-      const versatileTags = tagData.versatile || [];
+      const { allTags, nsfwTags } = await fetchWaifuTags();
+      const isNsfwChannel = message.channel.id === PERSONAL_WAIFU_CHANNEL;
 
-      let tagsToShow = [...sfwTags, ...versatileTags];
-      if (message.channel.id === PERSONAL_WAIFU_CHANNEL) {
-        tagsToShow = [...tagsToShow, ...nsfwTags];
+      let tagsToShow = allTags.filter((t) => !nsfwTags.includes(t));
+      if (isNsfwChannel) {
+        tagsToShow = allTags;
       }
 
       const embed = new EmbedBuilder()
@@ -157,7 +193,10 @@ if (command === "waifu") {
         .setFooter({ text: "Use !waifu <tag> to search" });
 
       if (tagsToShow.length > 50) {
-        embed.addFields({ name: "And more...", value: `Total tags: ${tagsToShow.length}` });
+        embed.addFields({
+          name: "And more...",
+          value: `Total tags: ${tagsToShow.length}`,
+        });
       }
 
       message.channel.send({ embeds: [embed] });
@@ -170,7 +209,8 @@ if (command === "waifu") {
 
 // Handle anime button interactions
 client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isButton() || !interaction.customId.startsWith("anime_")) return;
+  if (!interaction.isButton() || !interaction.customId.startsWith("anime_"))
+    return;
 
   const malId = interaction.customId.replace("anime_", "");
   try {
