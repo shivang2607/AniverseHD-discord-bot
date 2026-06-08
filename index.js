@@ -74,6 +74,7 @@ async function fetchAnimeNews() {
 
   const parser = new XMLParser({
     ignoreAttributes: false,
+    cdataPropName: "__cdata",
     tagValueProcessor: (tagName, tagValue) =>
       typeof tagValue === "string" ? tagValue.replace(/&amp;/g, "&") : tagValue,
   });
@@ -89,12 +90,15 @@ async function fetchAnimeNews() {
       if (item.category)
         cats = Array.isArray(item.category) ? item.category : [item.category];
       const guid = item.guid?.["#text"] || item.guid || "";
+      // CDATA sections come back as { __cdata: "..." } with cdataPropName set
+      const rawDesc =
+        item.description?.__cdata ?? item.description ?? "";
       return {
         id: extractId(guid),
         guid,
         title: item.title || "Untitled",
         link: item.link || "",
-        description: stripHtml(item.description || "").slice(0, 400),
+        description: stripHtml(String(rawDesc)).slice(0, 400),
         pubDate: item.pubDate || "",
         categories: cats,
       };
@@ -146,10 +150,20 @@ async function postTrendingNews(channel) {
         },
         timeout: 8000,
       });
-      const imgMatch = pageRes.data.match(
-        /<meta\s+property="og:image"\s+content="([^"]+)"/i
-      );
-      if (imgMatch) imageUrl = imgMatch[1];
+      const html = pageRes.data;
+      // Match both attribute orderings and twitter:image fallback
+      const imgPatterns = [
+        /<meta\s+property="og:image"\s+content="([^"]+)"/i,
+        /<meta\s+content="([^"]+)"\s+property="og:image"/i,
+        /<meta\s+property="og:image:url"\s+content="([^"]+)"/i,
+        /<meta\s+content="([^"]+)"\s+property="og:image:url"/i,
+        /<meta\s+name="twitter:image"\s+content="([^"]+)"/i,
+        /<meta\s+content="([^"]+)"\s+name="twitter:image"/i,
+      ];
+      for (const pattern of imgPatterns) {
+        const m = html.match(pattern);
+        if (m?.[1]) { imageUrl = m[1]; break; }
+      }
     } catch {}
 
     let description = newArticle.description || "No summary available.";
