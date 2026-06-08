@@ -15,50 +15,42 @@ import { getAnimeEmbed } from "./utils.js";
 
 dotenv.config();
 
-// ── Daily Anime News ──────────────────────────────────────────────
+// ── Hourly Anime News ──────────────────────────────────────────────
 const NEWS_CHANNEL = process.env.NEWS_CHANNEL;
 const ANN_RSS_URL = "https://www.animenewsnetwork.com/newsroom/rss.xml";
 const POSTED_NEWS_FILE = "./posted_news.json";
 
-// Target: 9:00 PM IST = 3:30 PM UTC (IST = UTC+5:30)
-// cron format: minute hour day month weekday
-const NEWS_CRON = "30 15 * * *"; // 15:30 UTC = 21:00 IST
+// Every hour at minute 0
+const NEWS_CRON = "0 * * * *";
 
-function loadPostedNews() {
-  if (!existsSync(POSTED_NEWS_FILE)) {
-    return { lastTitle: "", lastLink: "" };
-  }
+// Categories considered "trending/top" anime news
+const TRENDING_CATS = new Set([
+  "Anime", "Manga", "Light Novels", "Games", "Industry", "Events", "Comics", "Music",
+]);
+
+// Max stored IDs to keep file small
+const MAX_STORED = 100;
+
+function loadPostedIds() {
+  if (!existsSync(POSTED_NEWS_FILE)) return new Set();
   try {
-    return JSON.parse(readFileSync(POSTED_NEWS_FILE, "utf-8"));
+    const arr = JSON.parse(readFileSync(POSTED_NEWS_FILE, "utf-8"));
+    return new Set(Array.isArray(arr) ? arr : []);
   } catch {
-    return { lastTitle: "", lastLink: "" };
+    return new Set();
   }
 }
 
-function savePostedNews(title, link) {
-  writeFileSync(POSTED_NEWS_FILE, JSON.stringify({ lastTitle: title, lastLink: link }, null, 2));
+function savePostedIds(ids) {
+  const arr = Array.from(ids).slice(-MAX_STORED);
+  writeFileSync(POSTED_NEWS_FILE, JSON.stringify(arr));
 }
 
-async function fetchLatestAnimeNews() {
-  const response = await axios.get(ANN_RSS_URL, {
-    headers: { "User-Agent": "AnimeInfoBot/1.0" },
-    timeout: 10000,
-  });
-
-  const parser = new XMLParser({ ignoreAttributes: false });
-  const parsed = parser.parse(response.data);
-  const items = parsed?.rss?.channel?.item;
-
-  if (!items || items.length === 0) return null;
-
-  // items can be a single object if only one item exists
-  const first = Array.isArray(items) ? items[0] : items;
-  return {
-    title: first.title || "Untitled",
-    link: first.link || "",
-    description: stripHtml(first.description || "").slice(0, 400),
-    pubDate: first.pubDate || "",
-  };
+// Extract numeric ID from ANN guid (e.g. ".../.238283" → "238283")
+function extractId(guid) {
+  if (!guid) return null;
+  const m = guid.match(/\.(\d+)\s*$/);
+  return m ? m[1] : null;
 }
 
 function stripHtml(html) {
@@ -74,54 +66,122 @@ function stripHtml(html) {
     .trim();
 }
 
-async function postDailyNews(channel) {
+async function fetchAnimeNews() {
+  const response = await axios.get(ANN_RSS_URL, {
+    headers: { "User-Agent": "AnimeInfoBot/1.0" },
+    timeout: 10000,
+  });
+
+  const parser = new XMLParser({
+    ignoreAttributes: false,
+    tagValueProcessor: (tagName, tagValue) =>
+      typeof tagValue === "string" ? tagValue.replace(/&amp;/g, "&") : tagValue,
+  });
+  const parsed = parser.parse(response.data);
+  let items = parsed?.rss?.channel?.item;
+
+  if (!items) return [];
+  if (!Array.isArray(items)) items = [items];
+
+  return items
+    .map((item) => {
+      let cats = [];
+      if (item.category)
+        cats = Array.isArray(item.category) ? item.category : [item.category];
+      const guid = item.guid?.["#text"] || item.guid || "";
+      return {
+        id: extractId(guid),
+        guid,
+        title: item.title || "Untitled",
+        link: item.link || "",
+        description: stripHtml(item.description || "").slice(0, 400),
+        pubDate: item.pubDate || "",
+        categories: cats,
+      };
+    })
+    .filter((a) => a.id); // skip items with no valid ID
+}
+
+async function postTrendingNews(channel) {
   try {
-    const article = await fetchLatestAnimeNews();
-    if (!article) {
-      console.log("[Daily News] No articles found.");
+    const articles = await fetchAnimeNews();
+    if (articles.length === 0) {
+      console.log("[Anime News] No articles found, skipping.");
       return;
     }
 
-    const posted = loadPostedNews();
+    const postedIds = loadPostedIds();
 
-    // Deduplication: skip if same article was already posted
-    if (posted.lastLink === article.link && posted.lastTitle === article.title) {
-      console.log("[Daily News] Already posted this article, skipping.");
+    // Filter to trending anime-relevant articles only
+    const trending = articles.filter((a) =>
+      a.categories.some((c) => TRENDING_CATS.has(c.trim()))
+    );
+
+    if (trending.length === 0) {
+      console.log("[Anime News] No trending anime articles, skipping.");
       return;
     }
 
-    // Fetch the article page for an image
+    // Find the newest trending article we haven't posted yet
+    let newArticle = null;
+    for (const article of trending) {
+      if (!postedIds.has(article.id)) {
+        newArticle = article;
+        break;
+      }
+    }
+
+    if (!newArticle) {
+      console.log("[Anime News] No new trending articles since last check, skipping.");
+      return;
+    }
+
+    // Fetch og:image from article page
     let imageUrl = null;
     try {
-      const pageRes = await axios.get(article.link, {
-        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+      const pageRes = await axios.get(newArticle.link, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        },
         timeout: 8000,
       });
-      const imgMatch = pageRes.data.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i);
+      const imgMatch = pageRes.data.match(
+        /<meta\s+property="og:image"\s+content="([^"]+)"/i
+      );
       if (imgMatch) imageUrl = imgMatch[1];
-    } catch {
-      // no image, that's fine
-    }
+    } catch {}
 
-    let description = article.description || "No summary available.";
-    if (description.length >= 400) description = description.slice(0, 397) + "...";
+    let description = newArticle.description || "No summary available.";
+    if (description.length >= 400)
+      description = description.slice(0, 397) + "...";
 
     const embed = new EmbedBuilder()
-      .setTitle(article.title)
-      .setURL(article.link)
+      .setTitle(newArticle.title)
+      .setURL(newArticle.link)
       .setDescription(description)
       .setColor(0xff6600)
-      .setTimestamp(new Date(article.pubDate || Date.now()))
-      .setFooter({ text: "Daily Anime News • Anime News Network" })
-      .setAuthor({ name: "📰 Anime News Network", url: "https://www.animenewsnetwork.com", iconURL: "https://www.animenewsnetwork.com/img/logo_alt.gif" });
+      .setTimestamp(new Date(newArticle.pubDate || Date.now()))
+      .setFooter({
+        text: `Trending Anime News • ${newArticle.categories.join(", ")} • Anime News Network`,
+      })
+      .setAuthor({
+        name: "📰 Anime News Network",
+        url: "https://www.animenewsnetwork.com",
+        iconURL:
+          "https://www.animenewsnetwork.com/img/logo_alt.gif",
+      });
 
     if (imageUrl) embed.setImage(imageUrl);
 
     await channel.send({ embeds: [embed] });
-    savePostedNews(article.title, article.link);
-    console.log(`[Daily News] Posted: ${article.title}`);
+
+    postedIds.add(newArticle.id);
+    savePostedIds(postedIds);
+
+    console.log(`[Anime News] Posted: ${newArticle.title} [id: ${newArticle.id}]`);
   } catch (err) {
-    console.error("[Daily News] Error posting news:", err.message);
+    console.error("[Anime News] Error:", err.message);
   }
 }
 
@@ -184,22 +244,28 @@ async function fetchWaifu(tagSlug = null, nsfw = false) {
 client.on("clientReady", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // Schedule daily anime news at 9:00 PM IST (15:30 UTC)
+  // Schedule hourly anime news check
   if (NEWS_CHANNEL) {
     cron.schedule(NEWS_CRON, () => {
       const channel = client.channels.cache.get(NEWS_CHANNEL);
       if (channel) {
-        postDailyNews(channel);
+        postTrendingNews(channel);
       } else {
-        console.log("[Daily News] Channel not found, trying to fetch...");
-        client.channels.fetch(NEWS_CHANNEL).then((ch) => {
-          if (ch) postDailyNews(ch);
-        }).catch(() => console.error("[Daily News] Could not find news channel."));
+        console.log("[Anime News] Channel not found, trying to fetch...");
+        client.channels.fetch(NEWS_CHANNEL)
+          .then((ch) => {
+            if (ch) postTrendingNews(ch);
+          })
+          .catch(() =>
+            console.error("[Anime News] Could not find news channel.")
+          );
       }
     });
-    console.log("📰 Daily anime news scheduled for 9:00 PM IST");
+    console.log("📰 Hourly trending anime news scheduled (checks every hour)");
   } else {
-    console.log("⚠️ NEWS_CHANNEL not set in .env — daily news disabled.");
+    console.log(
+      "⚠️ NEWS_CHANNEL not set in .env — hourly anime news disabled."
+    );
   }
 });
 
