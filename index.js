@@ -8,9 +8,122 @@ import {
 } from "discord.js";
 import axios from "axios";
 import dotenv from "dotenv";
+import cron from "node-cron";
+import { XMLParser } from "fast-xml-parser";
+import { readFileSync, writeFileSync, existsSync } from "fs";
 import { getAnimeEmbed } from "./utils.js";
 
 dotenv.config();
+
+// ── Daily Anime News ──────────────────────────────────────────────
+const NEWS_CHANNEL = process.env.NEWS_CHANNEL;
+const ANN_RSS_URL = "https://www.animenewsnetwork.com/newsroom/rss.xml";
+const POSTED_NEWS_FILE = "./posted_news.json";
+
+// Target: 9:00 PM IST = 3:30 PM UTC (IST = UTC+5:30)
+// cron format: minute hour day month weekday
+const NEWS_CRON = "30 15 * * *"; // 15:30 UTC = 21:00 IST
+
+function loadPostedNews() {
+  if (!existsSync(POSTED_NEWS_FILE)) {
+    return { lastTitle: "", lastLink: "" };
+  }
+  try {
+    return JSON.parse(readFileSync(POSTED_NEWS_FILE, "utf-8"));
+  } catch {
+    return { lastTitle: "", lastLink: "" };
+  }
+}
+
+function savePostedNews(title, link) {
+  writeFileSync(POSTED_NEWS_FILE, JSON.stringify({ lastTitle: title, lastLink: link }, null, 2));
+}
+
+async function fetchLatestAnimeNews() {
+  const response = await axios.get(ANN_RSS_URL, {
+    headers: { "User-Agent": "AnimeInfoBot/1.0" },
+    timeout: 10000,
+  });
+
+  const parser = new XMLParser({ ignoreAttributes: false });
+  const parsed = parser.parse(response.data);
+  const items = parsed?.rss?.channel?.item;
+
+  if (!items || items.length === 0) return null;
+
+  // items can be a single object if only one item exists
+  const first = Array.isArray(items) ? items[0] : items;
+  return {
+    title: first.title || "Untitled",
+    link: first.link || "",
+    description: stripHtml(first.description || "").slice(0, 400),
+    pubDate: first.pubDate || "",
+  };
+}
+
+function stripHtml(html) {
+  return html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .trim();
+}
+
+async function postDailyNews(channel) {
+  try {
+    const article = await fetchLatestAnimeNews();
+    if (!article) {
+      console.log("[Daily News] No articles found.");
+      return;
+    }
+
+    const posted = loadPostedNews();
+
+    // Deduplication: skip if same article was already posted
+    if (posted.lastLink === article.link && posted.lastTitle === article.title) {
+      console.log("[Daily News] Already posted this article, skipping.");
+      return;
+    }
+
+    // Fetch the article page for an image
+    let imageUrl = null;
+    try {
+      const pageRes = await axios.get(article.link, {
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+        timeout: 8000,
+      });
+      const imgMatch = pageRes.data.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i);
+      if (imgMatch) imageUrl = imgMatch[1];
+    } catch {
+      // no image, that's fine
+    }
+
+    let description = article.description || "No summary available.";
+    if (description.length >= 400) description = description.slice(0, 397) + "...";
+
+    const embed = new EmbedBuilder()
+      .setTitle(article.title)
+      .setURL(article.link)
+      .setDescription(description)
+      .setColor(0xff6600)
+      .setTimestamp(new Date(article.pubDate || Date.now()))
+      .setFooter({ text: "Daily Anime News • Anime News Network" })
+      .setAuthor({ name: "📰 Anime News Network", url: "https://www.animenewsnetwork.com", iconURL: "https://www.animenewsnetwork.com/img/logo_alt.gif" });
+
+    if (imageUrl) embed.setImage(imageUrl);
+
+    await channel.send({ embeds: [embed] });
+    savePostedNews(article.title, article.link);
+    console.log(`[Daily News] Posted: ${article.title}`);
+  } catch (err) {
+    console.error("[Daily News] Error posting news:", err.message);
+  }
+}
 
 const client = new Client({
   intents: [
@@ -70,6 +183,24 @@ async function fetchWaifu(tagSlug = null, nsfw = false) {
 
 client.on("clientReady", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
+
+  // Schedule daily anime news at 9:00 PM IST (15:30 UTC)
+  if (NEWS_CHANNEL) {
+    cron.schedule(NEWS_CRON, () => {
+      const channel = client.channels.cache.get(NEWS_CHANNEL);
+      if (channel) {
+        postDailyNews(channel);
+      } else {
+        console.log("[Daily News] Channel not found, trying to fetch...");
+        client.channels.fetch(NEWS_CHANNEL).then((ch) => {
+          if (ch) postDailyNews(ch);
+        }).catch(() => console.error("[Daily News] Could not find news channel."));
+      }
+    });
+    console.log("📰 Daily anime news scheduled for 9:00 PM IST");
+  } else {
+    console.log("⚠️ NEWS_CHANNEL not set in .env — daily news disabled.");
+  }
 });
 
 client.on("messageCreate", async (message) => {
