@@ -174,7 +174,10 @@ async function postTrendingNews(channel) {
 
     if (imageUrl) embed.setImage(imageUrl);
 
-    await channel.send({ embeds: [embed] });
+    await channel.threads.create({
+      name: newArticle.title.slice(0, 100),
+      message: { embeds: [embed] },
+    });
 
     postedIds.add(newArticle.id);
     savePostedIds(postedIds);
@@ -241,7 +244,7 @@ async function fetchWaifu(tagSlug = null, nsfw = false) {
   return data.items?.[0] || null;
 }
 
-client.on("clientReady", () => {
+client.on("ready", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
   // Schedule hourly anime news check
