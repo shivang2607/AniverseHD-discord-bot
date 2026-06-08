@@ -11,14 +11,19 @@ import dotenv from "dotenv";
 import cron from "node-cron";
 import { XMLParser } from "fast-xml-parser";
 import { readFileSync, writeFileSync, existsSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 import { getAnimeEmbed } from "./utils.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 dotenv.config();
 
 // ── Hourly Anime News ──────────────────────────────────────────────
 const NEWS_CHANNEL = process.env.NEWS_CHANNEL;
 const ANN_RSS_URL = "https://www.animenewsnetwork.com/newsroom/rss.xml";
-const POSTED_NEWS_FILE = "./posted_news.json";
+// Override with POSTED_NEWS_FILE env var to point at a persistent volume in production
+const POSTED_NEWS_FILE = process.env.POSTED_NEWS_FILE || join(__dirname, "posted_news.json");
 
 // Every hour at minute 0
 const NEWS_CRON = "0 * * * *";
@@ -89,7 +94,12 @@ async function fetchAnimeNews() {
       let cats = [];
       if (item.category)
         cats = Array.isArray(item.category) ? item.category : [item.category];
-      const guid = item.guid?.["#text"] || item.guid || "";
+      // guid can be a plain string, { "#text": "..." }, or { __cdata: "..." } depending on the feed
+      const guid =
+        item.guid?.__cdata ||
+        item.guid?.["#text"] ||
+        (typeof item.guid === "string" ? item.guid : "") ||
+        "";
       // CDATA sections come back as { __cdata: "..." } with cdataPropName set
       const rawDesc =
         item.description?.__cdata ?? item.description ?? "";
@@ -140,6 +150,10 @@ async function postTrendingNews(channel) {
       return;
     }
 
+    // Mark as posted BEFORE sending so a failed/partial post never duplicates
+    postedIds.add(newArticle.id);
+    savePostedIds(postedIds);
+
     // Fetch og:image from article page
     let imageUrl = null;
     try {
@@ -151,24 +165,28 @@ async function postTrendingNews(channel) {
         timeout: 8000,
       });
       const html = pageRes.data;
-      // Match both attribute orderings and twitter:image fallback
+      // Use [^>]* so any number of other attributes between property/content are tolerated
       const imgPatterns = [
-        /<meta\s+property="og:image"\s+content="([^"]+)"/i,
-        /<meta\s+content="([^"]+)"\s+property="og:image"/i,
-        /<meta\s+property="og:image:url"\s+content="([^"]+)"/i,
-        /<meta\s+content="([^"]+)"\s+property="og:image:url"/i,
-        /<meta\s+name="twitter:image"\s+content="([^"]+)"/i,
-        /<meta\s+content="([^"]+)"\s+name="twitter:image"/i,
+        /<meta[^>]*\bproperty="og:image"[^>]*\bcontent="([^"]+)"/i,
+        /<meta[^>]*\bcontent="([^"]+)"[^>]*\bproperty="og:image"/i,
+        /<meta[^>]*\bproperty="og:image:url"[^>]*\bcontent="([^"]+)"/i,
+        /<meta[^>]*\bcontent="([^"]+)"[^>]*\bproperty="og:image:url"/i,
+        /<meta[^>]*\bname="twitter:image(?::src)?"[^>]*\bcontent="([^"]+)"/i,
+        /<meta[^>]*\bcontent="([^"]+)"[^>]*\bname="twitter:image(?::src)?"/i,
       ];
       for (const pattern of imgPatterns) {
         const m = html.match(pattern);
         if (m?.[1]) { imageUrl = m[1]; break; }
       }
-    } catch {}
+    } catch (err) {
+      console.warn("[Anime News] Image fetch failed:", err.message);
+    }
 
     let description = newArticle.description || "No summary available.";
     if (description.length >= 400)
       description = description.slice(0, 397) + "...";
+
+    console.log(`[Anime News] description="${description.slice(0, 80)}" image=${imageUrl}`);
 
     const embed = new EmbedBuilder()
       .setTitle(newArticle.title)
@@ -192,9 +210,6 @@ async function postTrendingNews(channel) {
       name: newArticle.title.slice(0, 100),
       message: { embeds: [embed] },
     });
-
-    postedIds.add(newArticle.id);
-    savePostedIds(postedIds);
 
     console.log(`[Anime News] Posted: ${newArticle.title} [id: ${newArticle.id}]`);
   } catch (err) {
