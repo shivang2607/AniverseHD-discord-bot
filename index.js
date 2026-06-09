@@ -19,7 +19,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 dotenv.config();
 
-// ── Hourly Anime News ──────────────────────────────────────────────
+//  Hourly Anime News 
 const NEWS_CHANNEL = process.env.NEWS_CHANNEL;
 const ANN_RSS_URL = "https://www.animenewsnetwork.com/newsroom/rss.xml";
 // Override with POSTED_NEWS_FILE env var to point at a persistent volume in production
@@ -30,7 +30,7 @@ const NEWS_CRON = "0 * * * *";
 
 // Categories considered "trending/top" anime news
 const TRENDING_CATS = new Set([
-  "Anime", "Manga", "Light Novels", "Games", "Industry", "Events", "Comics", "Music",
+  "Anime", "Manga", "Light Novels", "Events", "Comics"
 ]);
 
 // Max stored IDs to keep file small
